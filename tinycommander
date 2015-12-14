@@ -1,0 +1,1090 @@
+#! /bin/busybox ash
+# Tiny explorer, v0.1, 2013, by deetee
+# Console file manager, written as shell script for ash (busybox)
+# Including tcalc (RPN-calculator) and tslide (text slide show)
+
+### GLOBAL VARIABLES
+ESC=$'\x1b'
+CSI=$'\x1b['
+SPACE=$'\x20'
+BACKSPACE=$'\x7f'
+TAB=$'\x09'
+CUROFF=$'\033[?25l'; CURON=$'\033[?25h'  # hide/show cursor
+FGBLACK=${CSI}30m; FGRED=${CSI}31m; FGGREEN=${CSI}32m; FGBROWN=${CSI}33m
+FGBLUE=${CSI}34m; FGMAGENTA=${CSI}35m; FGCYAN=${CSI}36m; FGWHITE=${CSI}37m
+BGBLACK=${CSI}40m; BGRED=${CSI}41m; BGGREEN=${CSI}42m; BGBROWN=${CSI}43m
+BGBLUE=${CSI}44m; BGMAGENTA=${CSI}45m; BGCYAN=${CSI}46m; BGWHITE=${CSI}47m
+ERESET=${CSI}0m; EBOLD=${CSI}1m; EBLINK=${CSI}5m; EREVERSE=${CSI}7m
+CURUP=${CSI}1A; CURDOWN=${CSI}1B; CURRIGHT=${CSI}1C; CURLEFT=${CSI}1D
+ERASELINE=${CSI}K
+
+
+### LOCAL VARIABLES
+MAXROW=$(stty size | cut -d" " -f1); MAXCOL=$(stty size | cut -d" " -f2)
+EDITOR="vi"
+TITLECOLOR=$FGBLACK$BGCYAN; PANCOLOR=$FGWHITE$BGBLUE
+BARCOLOR=$FGBLACK$BGCYAN;CHOOSECOLOR=$EBOLD$FGBROWN$BGBLUE
+STATUSCOLOR=$EBOLD$FGWHITE$BGGREEN; HELPCOLOR=$FGBLACK$BGWHITE
+MESSAGECOLOR=$FGWHITE$BGRED; MENUCOLOR=$EBOLD$FGWHITE$BGMAGENTA
+COL1=1; COL2=41; ROW1=1; ROW2=1
+MAXFILELIST=8
+STATUSLINE=$(($MAXFILELIST + 2))
+CLEARSTRING="                                        "
+
+PREC=15
+
+CALCPANROW=5; CALCINPUTROW=9; CALCHELPROW=1
+CALCPANCOLOR=$EBOLD$FGWHITE$BGBLUE; CALCINPUTCOLOR=$EBOLD$FGBROWN$BGBLACK
+
+slide=1; SHOWHELP=1
+SLIDEFGCOLOR=$FGBROWN; SLIDEBGCOLOR=$BGBLUE; SLIDEEFFECT=$EBOLD
+
+TDRAWCOLOR=$FGWHITE$BGBLUE; TDRAWSTATUSLINE=1
+TDRAWELLFILE="te_tdraw.ell"; TDRAWRECFILE="te_tdraw.rec"
+TDRAWLINFILE="te_tdraw.lin"; TDRAWTXTFILE="te_tdraw.txt"
+TDRAWTMPFILE="te_tdraw.tmp"; TDRAWSSFILE="te_tdraw_screenshot.txt"
+
+
+### KEY QUERY
+_key() { IFS= read -s -n1 _KEY; } # read _KEY
+
+_keys(){ # read _KEYS
+ _KEYS=; __KX=
+ ESC_END=[a-zA-Z~^\$@$ESC] # ends key sequence
+ while :; do
+  read -s -n1 -t1 __KX # read
+  _KEYS=$_KEYS$__KX
+  case $__KX in
+   "" | $ESC_END ) break ;;
+  esac
+ done
+}
+
+_esc2key(){ # rename esc-keys
+ case $1 in
+  "$CSI"A | ${CSI}OA ) _ESC2KEY=UP ;; # cursor keys
+  "$CSI"B | ${CSI}0B ) _ESC2KEY=DOWN ;;
+  "$CSI"C | ${CSI}OC ) _ESC2KEY=RIGHT ;;
+  "$CSI"D | ${CSI}OD ) _ESC2KEY=LEFT ;;
+  "$CSI"11~ | "$CSI["A | ${ESC}OP ) _ESC2KEY=F1 ;; # function keys
+  "$CSI"12~ | "$CSI["B | ${ESC}OQ ) _ESC2KEY=F2 ;;
+  "$CSI"13~ | "$CSI["C | ${ESC}OR ) _ESC2KEY=F3 ;;
+  "$CSI"14~ | "$CSI["D | ${ESC}OS ) _ESC2KEY=F4 ;;
+  "$CSI"15~ | "$CSI["E ) _ESC2KEY=F5 ;;
+  "$CSI"17~ | "$CSI["F ) _ESC2KEY=F6 ;;
+  "$CSI"18~ ) _ESC2KEY=F7 ;;
+  "$CSI"19~ ) _ESC2KEY=F8 ;;
+  "$CSI"20~ ) _ESC2KEY=F9 ;;
+  "$CSI"21~ ) _ESC2KEY=F10 ;;
+  "$CSI"23~ ) _ESC2KEY=F11 ;;
+  "$CSI"24~ ) _ESC2KEY=F12 ;;
+  "$CSI"2~ ) _ESC2KEY=INS ;; # ins del home end pup pdn
+  "$CSI"3~ ) _ESC2KEY=DEL ;;
+  "$CSI"[17]~ | "$CSI"H ) _ESC2KEY=HOME ;;
+  "$CSI"[47]~ | "$CSI"F ) _ESC2KEY=END ;;
+  "$CSI"5~ ) _ESC2KEY=PGUP ;;
+  "$CSI"6~ ) _ESC2KEY=PGDN ;;
+  "$ESC""$ESC" ) _ESC2KEY=ESC ;; # esc
+  *) _ESC2KEY=UNKNOWN ;; # other
+ esac
+ [ -n "$2" ] && eval "$2=\$_ESC2KEY"
+}
+
+_get_key(){ # get keys and synonyms and store in _KEY
+ _key
+ case $_KEY in
+  "$ESC") _keys; _esc2key "$ESC$_KEYS" _KEY ;;
+ esac
+ case $_KEY in
+  $ESC) _keys; _KEY=$ESC$_KEYS ;;
+  "$SPACE" ) _KEY=SPACE ;; # space enter tab backspace
+  '' ) _KEY=ENTER ;;
+  "$TAB" ) _KEY=TAB ;;
+  "$BACKSPACE" ) _KEY=BACKSPACE ;;
+ esac
+}
+
+
+### SUBPROGRAMS
+_help(){ # help
+ echo -n "${CSI}$ROW1;1H$HELPCOLOR"
+ echo "___TINY__EXPLORER___"
+ echo " This help:   1,h,? "
+ echo " User menu:     2,u "
+ echo " Cat/edit:  3,l/4,e "
+ echo " Copy/move: 5,c/6,m "
+ echo " Rename/del:  7,r/8 "
+ echo " Make_dir/do:  9,11 "
+ echo " Exit:   0,q,ESCESC "
+ echo " Move: cursr,'asdw' "
+ echo " Switch pan: TAB,BS "
+ echo " Shell:       SPACE "
+ echo " Execute:     ENTER "
+ echo "__v0.1_2013_deetee__"
+ echo $ERESET
+ read -n1 -s DUMMY
+}
+
+_print_helpline(){ # help in statusline
+ echo -n "${CSI}$STATUSLINE;1H$TITLECOLOR"
+ echo "1_help  2_menu  3_cat  4_edit  5_cp  6_mv  7_ren  8_del  9_mkdir  10_exit  11_do"
+ echo $ERESET
+}
+
+_menu(){ # special user menu
+ echo -n "${CSI}1;1H"$MENUCOLOR
+ echo "____USER_MENU____"
+ echo "1 system status  "
+ echo "2 RPN-calculator "
+ echo "3 text slide     "
+ echo "4 text draw      "
+# echo "4 cat file       "
+ echo $ERESET
+ _get_key
+ case "$_KEY" in
+  1) _print_status ;;
+  2) echo $CURON; _tcalc; echo $CUROFF ;;
+  3) _tslide ;;
+  4) echo $CURON;_tdraw; echo $CUROFF;;
+#  4) clear; cat $PATH0/$CHOSENFILE | less ;;
+ esac
+}
+
+_print_status(){ # print status
+ echo -n "${CSI}$STATUSLINE;1H$STATUSCOLOR$CLEARSTRING$CLEARSTRING"
+ echo -n "${CSI}$STATUSLINE;1H"
+ echo -n " " # system size used/total
+ df -k /home | tail -1 | awk '{printf "disk%2.1f%%",$3/$2*100}'
+ echo -n " " # mem
+ free -b | head -2 | tail -1 | awk '{printf "mem%2.1f%%",$3/$2*100}'
+ echo -n " " # cpu
+ top -b -n 1 | head -2 | tail -1 | awk '{printf "cpu%s",$2}'
+ echo -n " " # time
+ date '+date%Y-%m-%d time%H:%M '
+ read -n1 -s DUMMY
+ echo $ERESET
+}
+
+_copy_file(){ # copy file
+ if [ $PAN -eq 1 ]; then
+  if [ -e $PATH2/$CHOSENFILE ]; then
+   MESSAGE="Really overwrite $CHOSENFILE (y)?"; _message_wait
+   if [ $ANSWER == y ]; then cp -R $PATH0/$CHOSENFILE $PATH2; fi
+  else cp -R $PATH0/$CHOSENFILE $PATH2; FILECOUNT2=$(ls -A $PATH2 | wc -w)
+  fi
+ else
+  if [ -e $PATH1/$CHOSENFILE ]; then
+   MESSAGE="Really overwrite $CHOSENFILE (y)?"; _message_wait
+   if [ $ANSWER == y ]; then cp $PATH0/$CHOSENFILE $PATH1; fi
+  else cp $PATH0/$CHOSENFILE $PATH1; FILECOUNT1=$(ls -A $PATH1 | wc -w)
+  fi
+ fi
+}
+
+_move_file(){ # move file
+ if [ $PAN -eq 1 ]; then
+  if [ -e $PATH2/$CHOSENFILE ]; then
+   MESSAGE="Really overwrite $CHOSENFILE (y)?"; _message_wait
+   if [ $ANSWER == y ]; then mv -f $PATH0/$CHOSENFILE $PATH2; fi
+  else mv $PATH0/$CHOSENFILE $PATH2
+  fi
+  FILECOUNT=$(ls -A $PATH1 | wc -w); FILECOUNT1=$FILECOUNT
+ else
+  if [ -e $PATH1/$CHOSENFILE ]; then
+   MESSAGE="Really overwrite $CHOSENFILE (y)?"; _message_wait
+   if [ $ANSWER == y ]; then mv -f $PATH0/$CHOSENFILE $PATH1; fi
+  else mv $PATH0/$CHOSENFILE $PATH1
+  fi
+  FILECOUNT=$(ls -A $PATH2 | wc -w); FILECOUNT2=$FILECOUNT
+ fi
+}
+
+_rename_file(){ # rename file
+ MESSAGE="Rename $CHOSENFILE to: "; _message
+ echo -n $CURON; read NEWNAME; echo $CUROFF
+ if [ -e $PATH0/$NEWNAME ]; then
+  MESSAGE="Really overwrite $NEWNAME (y)?"; _message_wait
+  if [ $ANSWER == y ]; then mv $PATH0/$CHOSENFILE $PATH0/$NEWNAME; fi
+ else mv $PATH0/$CHOSENFILE $PATH0/$NEWNAME
+ fi
+}
+
+_delete_file(){ # del
+ if [ -z != $CHOSENFILE ]; then
+  MESSAGE="Really delete $CHOSENFILE (y)?"; _message_wait
+  if [ $ANSWER == y ]; then rm -R $PATH0/$CHOSENFILE; fi
+ fi
+ FILECOUNT=$(ls -A $PATH0 | wc -w);
+ if [ $PAN -eq 1 ]; then FILECOUNT1=$FILECOUNT; else FILECOUNT2=$FILECOUNT; fi
+}
+
+_make_dir(){ # mkdir
+ MESSAGE="Make directory: "; _message
+ echo -n $CURON; read NEWDIR; echo $CUROFF
+ if [ -e $PATH0/$NEWDIR ]; then
+  MESSAGE="File exists"; _message_wait
+ else mkdir $PATH0/$NEWDIR
+ fi
+}
+
+_do_something(){ # do somethng with current file
+ MESSAGE="Do what with $CHOSENFILE:"; _message
+ echo -n $CURON; echo -n ' '; read DOWHAT; echo -n $CUROFF
+ echo -n $ERESET$CURON
+ $DOWHAT $PATH0/$CHOSENFILE
+ echo -n $CUROFF
+}
+
+_switch_panel(){ # switch panel
+ if [ $PAN -eq 1 ];
+ then PAN=2
+  FILENR1=$FILENR; FILENR=$FILENR2; FILECOUNT=$FILECOUNT2
+  PATH1=$PATH0; PATH0=$PATH2
+  FILECHOOSE1=$FILECHOOSE; FILECHOOSE=$FILECHOOSE2;
+  CURLINE1=$CURLINE; CURLINE=$CURLINE2
+ else PAN=1
+  FILENR2=$FILENR; FILENR=$FILENR1; FILECOUNT=$FILECOUNT1
+  PATH2=$PATH0; PATH0=$PATH1
+  FILECHOOSE2=$FILECHOOSE; FILECHOOSE=$FILECHOOSE1;
+  CURLINE2=$CURLINE; CURLINE=$CURLINE1
+ fi
+}
+
+_scroll_down(){ # scroll down
+ if [ $FILENR -le $(($FILECOUNT - $MAXFILELIST)) ]; then
+  FILENR=$(($FILENR + 1))
+ fi
+ if [ $FILECHOOSE -lt $FILECOUNT ]; then
+  FILECHOOSE=$(($FILECHOOSE + 1))
+ fi
+ if [ $(($FILECHOOSE - $FILENR)) -gt $CURLINE ]; then
+  CURLINE=$(($FILECHOOSE - $FILENR))
+ fi
+}
+
+_page_down(){ # page down
+ i=0
+ while :; do
+  if [ $i -ge $MAXFILELIST ]; then break; fi
+  _scroll_down; i=$(($i + 1))
+ done
+}
+
+_scroll_up(){ # scroll up
+ if [ $FILENR -gt 1 ]; then FILENR=$(($FILENR - 1)); fi
+ if [ $FILECHOOSE -gt 1 ]; then FILECHOOSE=$(($FILECHOOSE - 1)); fi
+ if [ $FILENR -le 1 ]; then CURLINE=$(($FILECHOOSE - $FILENR)); fi
+}
+
+_page_up(){ # page up
+ i=0
+ while :; do
+  if [ $i -ge $MAXFILELIST ]; then break; fi
+  _scroll_up; i=$(($i + 1))
+ done
+}
+
+_change_dir_up(){ # cd ..
+ cd $PATH0; cd ..;
+ PATH0=$(pwd); FILECOUNT=$(ls -A $PATH0 | wc -w)
+ FILENR=1; FILECHOOSE=1; CURLINE=0
+ if [ $PAN -eq 1 ]; then PATH1=$PATH0; FILECOUNT1=$FILECOUNT; FILENR1=$FILENR
+ else PATH2=$PATH0; FILCOUNT2=$FILECOUNT; FILENR2=$FILENR
+ fi
+}
+
+_change_dir_down(){ # change to dir
+ if [ $PATH0 == / ]; then cd /$CHOSENFILE; else cd $PATH0/$CHOSENFILE; fi
+ PATH0=$(pwd); FILECOUNT=$(ls -A $PATH0 | wc -w); FILENR=1; FILECHOOSE=1
+ if [ $PAN -eq 1 ]; then
+  PATH1=$PATH0; FILECOUNT1=$FILECOUNT; FILENR1=$FILENR; FILECOOSE1=$FILECHOOSE
+  CURLINE1=$CURLINE; CURLINE=0
+ else
+  PATH2=$PATH0; FILECOUNT2=$FILECOUNT; FILENR2=$FILENR; FILECOOSE2=$FILECHOOSE
+  CURLINE2=$CURLINE; CURLINE=0
+ fi
+}
+_execute_shell(){ # shell
+ MESSAGE="Leave shell with \"exit\""; _message
+ echo $ERESET
+ if [ $PAN -eq 1 ]; then cd $PATH1; else cd $PATH2; fi
+ sh
+}
+
+_message(){ # print MESSAGE
+ echo -n "${CSI}$STATUSLINE;1H$MESSAGECOLOR$CLEARSTRING$CLEARSTRING"
+ echo -n "${CSI}$STATUSLINE;1H$MESSAGE"
+}
+
+_message_wait(){ # print MESSAGE, wait for keypress
+ _message; _get_key; ANSWER=$_KEY
+ echo $ERESET
+}
+
+_print_bar(){ # print chosen bar, eval. chosen file and dir
+ if [ $PAN -eq 1 ]; then
+  echo -n "${CSI}$(($ROW1 + $CURLINE + 1));$(($COL1 + 3))H$CHOOSECOLOR"
+  PATH0=$PATH1
+ else
+  echo -n "${CSI}$(($ROW2 + $CURLINE + 1));$(($COL2 + 3))H$CHOOSECOLOR"
+  PATH0=$PATH2
+ fi
+ CHOSENFILE=$( (ls -lAh $PATH0 | grep "^d" ; ls -lAh $PATH0 | grep "^-" ;
+  ls -Al | grep -E "^d|^-" -v | grep -v "^total") | 
+  awk '{ print $9;}' | head -$FILECHOOSE | tail -1)
+ echo -n $CHOSENFILE | cut -c1-29
+ CHOSENDIR=$( (ls -lA $PATH0 | grep "^d" ; ls -lA $PATH0 | grep "^-") |
+  awk '{ print substr($1,1,1);}' | head -$FILECHOOSE | tail -1)
+ echo -n $ERESET
+}
+
+_print_path(){ # print title lines
+ if [ $PAN -eq 1 ]; then
+  echo -n "${CSI}$ROW1;${COL1}H$TITLECOLOR$CLEARSTRING"
+  echo -n "${CSI}$ROW1;${COL1}H"; echo -n $PATH1 | cut -c1-40
+  echo -n "${CSI}$ROW2;${COL2}H$PANCOLOR$CLEARSTRING"
+  echo -n "${CSI}$ROW2;${COL2}H"; echo -n $PATH2 | cut -c1-40
+ else
+  echo -n "${CSI}$ROW1;${COL1}H$PANCOLOR$CLEARSTRING"
+  echo -n "${CSI}$ROW1;${COL1}H"; echo -n $PATH1 | cut -c1-40
+  echo -n "${CSI}$ROW2;${COL2}H$TITLECOLOR$CLEARSTRING"
+  echo -n "${CSI}$ROW2;${COL2}H"; echo -n $PATH2 | cut -c1-40
+ fi
+}
+
+_clear_pan(){
+ echo -n $PANCOLOR
+ i=1
+ if [ $PAN -eq 1 ]; then
+  while :; do
+   if [ $i -ge $(($MAXFILELIST + 1)) ]; then break; fi
+   echo -n "${CSI}$(($ROW1 + i));${COL1}H$CLEARSTRING"; i=$(($i + 1))
+  done
+ else
+  while :; do
+   if [ $i -ge $(($MAXFILELIST + 1)) ]; then break; fi
+   echo -n "${CSI}$(($ROW2 + i));${COL2}H$CLEARSTRING"; i=$(($i + 1))
+  done
+ fi
+}
+
+_print_pan1(){
+ echo -n $PANCOLOR
+ echo -n "${CSI}$(($ROW1 + 1));${COL1}H"
+ (ls -lAh $PATH1 | grep "^d" ; ls -lAh $PATH1 | grep "^-"
+  ls -Al $PATH1 | grep -E "^d|^-" -v | grep -v "^total") |
+  awk '{ printf " %s %-29s %6s \n",substr($1,1,1),substr($9,1,29),$5;}' |
+  head -$(($FILENR + $MAXFILELIST - 1)) | tail -$MAXFILELIST
+}
+
+_print_pan2(){ # clear pan 2 and ls
+ echo -n $PANCOLOR
+ echo -n "${CSI}$(($ROW2 + 1));${COL1}H"
+ (ls -lAh $PATH2 | grep "^d" ; ls -lAh $PATH2 | grep "^-"
+  ls -Al $PATH2 | grep -E "^d|^-" -v | grep -v "^total") |
+  awk '{ printf "\t\t\t\t\t %s %-29s %6s \n",substr($1,1,1),substr($9,1,29),$5;}' |
+  head -$(($FILENR + $MAXFILELIST - 1)) | tail -$MAXFILELIST
+}
+
+
+_print(){ # print actual pan and status
+ _print_path
+ if [ $PAN -eq 1 ]; then _print_pan1
+ else _print_pan2; fi
+ _print_bar; _print_helpline
+}
+
+_print_all(){ # print all
+ _print_path; _clear_pan;_print_pan1; _clear_pan; _print_pan2
+}
+
+### TDRAW
+_help_draw(){ # help
+ echo -n "${CSI}$ROW1;1H$HELPCOLOR"
+ echo "_Draw_Ascii_Objects_"
+ echo " This help:   1,h,? "
+ echo " Cut:           2,x "
+ echo " Copy:          3,c "
+ echo " Paste:         4,v "
+ echo " Draw line:     7,l "
+ echo " Draw text:     8,t "
+ echo " Screenshot:    9,p "
+ echo "_Exit:___0,q,ESCESC_"
+# echo "_Infoline:____11,i_"
+ echo $ERESET
+ read -n1 -s DUMMY
+}
+
+_clear_scr(){ # clear screen strings
+ i=1; EMPTYSTRING=""
+ while :; do if [ $i -gt $MAXCOL ]; then break; fi
+  EMPTYSTRING="$EMPTYSTRING " ; i=$(($i + 1))
+ done
+ i=1
+ while :; do if [ $i -gt $MAXROW ]; then break; fi
+  IFS='%'; export SCR$i=$EMPTYSTRING; unset IFS; i=$(($i + 1))
+ done
+}
+
+_draw_rec(){ # draw rectangle to screen strings
+ if [ -f $TDRAWRECFILE ]; then while read X1 Y1 X2 Y2; do
+  IFS='%'
+
+  if [ $X2 -gt $X1 ] && [ $Y2 -gt $Y1 ]; then
+   i=$(($Y1 + 1))
+   while :; do if [ $i -gt $Y2 ]; then break; fi
+#    m=$( awk 'BEGIN{ printf "%d",int('''$SLOPE'''*'''$i'''+'''$CROSS''');}' )
+    export TMP=$( eval echo \${SCR$m:0:$(($i - 1))}'_'\${SCR$m:$i} )
+    export SCR$m=$TMP
+    i=$(($i + 1))
+   done
+   
+  elif [ $X2 -gt $X1 ] && [ $Y1 -gt $Y2 ]; then
+   echo
+  elif [ $X1 -gt $X2 ] && [ $Y2 -gt $Y1 ]; then
+   echo
+  else
+   echo
+  fi
+
+#   SLOPE=$( awk 'BEGIN{ printf "%.'''$PREC'''f",('''$Y2'''-'''$Y1''')/('''$X2'''-'''$X1''');}' )
+#   CROSS=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$Y1'''-('''$SLOPE'''*'''$X1''');}' )
+#   if [ $X1 -lt $X2 ]; then
+#    i=$X1
+#    while :; do if [ $i -gt $X2 ]; then break; fi
+#     m=$( awk 'BEGIN{ printf "%d",int('''$SLOPE'''*'''$i'''+'''$CROSS''');}' )
+#     export TMP=$( eval echo \${SCR$m:0:$(($i - 1))}'$CHAR'\${SCR$m:$i} )
+#     export SCR$m=$TMP
+#     i=$(($i + 1))
+#    done
+#   else
+#    i=$X2
+#    while :; do if [ $i -gt $X1 ]; then break; fi
+#     m=$( awk 'BEGIN{ printf "%d",int('''$SLOPE'''*'''$i'''+'''$CROSS''');}' )
+#     export TMP=$( eval echo \${SCR$m:0:$(($i - 1))}'$CHAR'\${SCR$m:$i} )
+#     export SCR$m=$TMP
+#     i=$(($i + 1))
+#    done
+ #  fi
+
+#  else
+
+#   SLOPE=$( awk 'BEGIN{ printf "%.'''$PREC'''f",('''$X1'''-'''$X2''')/('''$Y1'''-'''$Y2''');}' )
+#   CROSS=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$X1'''-('''$SLOPE'''*'''$Y1''');}' )
+#   if [ $Y1 -lt $Y2 ]; then
+#    i=$Y1
+#    while :; do if [ $i -gt $Y2 ]; then break; fi
+#     m=$( awk 'BEGIN{ printf "%d",int('''$SLOPE'''*'''$i'''+'''$CROSS''');}' )
+#     export TMP=$( eval echo \${SCR$i:0:$(($m - 1))}'$CHAR'\${SCR$i:$m} )
+#     export SCR$i=$TMP
+#     i=$(($i + 1))
+#    done
+#   else
+#    i=$Y2
+#    while :; do if [ $i -gt $Y1 ]; then break; fi
+#     m=$( awk 'BEGIN{ printf "%d",int('''$SLOPE'''*'''$i'''+'''$CROSS''');}' )
+#     export TMP=$( eval echo \${SCR$i:0:$(($m - 1))}'$CHAR'\${SCR$i:$m} )
+#     export SCR$i=$TMP
+#     i=$(($i + 1))
+#    done
+#   fi
+
+#  fi
+  unset IFS
+ done < $TDRAWTXTFILE; fi
+}
+
+
+_draw_lin(){ # draw line to screen strings
+ if [ -f $TDRAWLINFILE ]; then while read X1 Y1 X2 Y2 CHAR; do
+  IFS='%'
+
+  ARGA=$( awk 'BEGIN{ printf "%d",('''$X1'''-'''$X2''');}' )
+  if [ $ARGA -lt 0 ]; then ARGA=$(($ARGA * -1)); fi
+  ARGB=$( awk 'BEGIN{ printf "%d",('''$Y1'''-'''$Y2''');}' )
+  if [ $ARGB -lt 0 ]; then ARGB=$(($ARGB * -1)); fi
+
+  if [ $ARGA -gt $ARGB ]; then
+
+   SLOPE=$( awk 'BEGIN{ printf "%.'''$PREC'''f",('''$Y2'''-'''$Y1''')/('''$X2'''-'''$X1''');}' )
+   CROSS=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$Y1'''-('''$SLOPE'''*'''$X1''');}' )
+   if [ $X1 -lt $X2 ]; then
+    i=$X1
+    while :; do if [ $i -gt $X2 ]; then break; fi
+     m=$( awk 'BEGIN{ printf "%d",int('''$SLOPE'''*'''$i'''+'''$CROSS''');}' )
+     export TMP=$( eval echo \${SCR$m:0:$(($i - 1))}'$CHAR'\${SCR$m:$i} )
+     export SCR$m=$TMP
+     i=$(($i + 1))
+    done
+   else
+    i=$X2
+    while :; do if [ $i -gt $X1 ]; then break; fi
+     m=$( awk 'BEGIN{ printf "%d",int('''$SLOPE'''*'''$i'''+'''$CROSS''');}' )
+     export TMP=$( eval echo \${SCR$m:0:$(($i - 1))}'$CHAR'\${SCR$m:$i} )
+     export SCR$m=$TMP
+     i=$(($i + 1))
+    done
+   fi
+
+  else
+
+   SLOPE=$( awk 'BEGIN{ printf "%.'''$PREC'''f",('''$X1'''-'''$X2''')/('''$Y1'''-'''$Y2''');}' )
+   CROSS=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$X1'''-('''$SLOPE'''*'''$Y1''');}' )
+   if [ $Y1 -lt $Y2 ]; then
+    i=$Y1
+    while :; do if [ $i -gt $Y2 ]; then break; fi
+     m=$( awk 'BEGIN{ printf "%d",int('''$SLOPE'''*'''$i'''+'''$CROSS''');}' )
+     export TMP=$( eval echo \${SCR$i:0:$(($m - 1))}'$CHAR'\${SCR$i:$m} )
+     export SCR$i=$TMP
+     i=$(($i + 1))
+    done
+   else
+    i=$Y2
+    while :; do if [ $i -gt $Y1 ]; then break; fi
+     m=$( awk 'BEGIN{ printf "%d",int('''$SLOPE'''*'''$i'''+'''$CROSS''');}' )
+     export TMP=$( eval echo \${SCR$i:0:$(($m - 1))}'$CHAR'\${SCR$i:$m} )
+     export SCR$i=$TMP
+     i=$(($i + 1))
+    done
+   fi
+
+  fi
+ unset IFS
+ done < $TDRAWLINFILE; fi
+}
+
+_draw_txt(){ # draw text to screen strings
+ if [ -f $TDRAWTXTFILE ]; then while read X1 Y1 ALIGN TEXT; do
+  IFS='%'
+
+  umlaut=$( echo $TEXT | tr -dc 'äöüÄÖÜß' | wc -c )
+  umlaut=$(($umlaut / 2))
+  i=1; EMPTYSTRING=""
+  while :; do if [ $i -gt $umlaut ]; then break; fi
+   EMPTYSTRING="$EMPTYSTRING " ; i=$(($i + 1))
+  done
+
+  case "$ALIGN" in
+   [hH])
+    export TMP=$( eval echo \${SCR$Y1:0:$(($X1 - 1))}'$TEXT$EMPTYSTRING'\${SCR$Y1:$(($X1 + ${#TEXT} - 1))} )
+    export SCR$Y1=$TMP ;;
+   [vV])
+    i=$Y1
+    while :; do if [ $i -gt $MAXROW ] || [ $i -ge $(($Y1 + ${#TEXT})) ]; then break; fi
+     CHAR=${TEXT:$(($i - $Y1)):1}
+     export TMP=$( eval echo \${SCR$i:0:$(($X1 - 1))}'$CHAR'\${SCR$i:$X1} )
+     export SCR$i=$TMP
+     i=$(($i + 1))
+    done ;;
+   [dD])
+    i=$Y1
+    while :; do if [ $i -gt $MAXROW ] || [ $i -ge $(($Y1 + ${#TEXT})) ]; then break; fi
+     CHAR=${TEXT:$(($i - $Y1)):1}
+     export TMP=$( eval echo \${SCR$i:0:$(($X1 - 1 + $i - $Y1))}'$CHAR'\${SCR$i:$(($X1 + $i - $Y1))} )
+     export SCR$i=$TMP
+     i=$(($i + 1))
+    done ;;
+   [uU])
+    i=$Y1
+    while :; do if [ $i -gt $MAXROW ] || [ $i -ge $(($Y1 + ${#TEXT})) ]; then break; fi
+     CHAR=${TEXT:$(($i - $Y1)):1}
+     m=$(($Y1 - $i + $Y1))
+     export TMP=$( eval echo \${SCR$m:0:$(($X1 - 1 + $i - $Y1))}'$CHAR'\${SCR$m:$(($X1 + $i - $Y1))} )
+     export SCR$m=$TMP
+     i=$(($i + 1))
+    done ;;
+   esac
+
+  unset IFS
+ done < $TDRAWTXTFILE; fi
+}
+
+_draw_screen_strings(){ # draw screen strings
+ echo -n $TDRAWCOLOR
+ i=1
+ IFS='%'
+ while :; do if [ $i -ge $(($MAXROW + 1)) ]; then break; fi
+  echo -n "${CSI}$i;1H"; eval echo -n \$SCR$i; i=$(($i + 1))
+ done
+ unset IFS;
+ _curpos
+}
+
+_draw_scr(){ # draw screen
+ _clear_scr
+ _draw_rec; _draw_lin; _draw_txt
+ _draw_screen_strings
+ echo -n $TDRAWCOLOR
+ i=1
+ IFS='%'
+ while :; do if [ $i -ge $(($MAXROW + 1)) ]; then break; fi
+  echo -n "${CSI}$i;1H"; eval echo -n \$SCR$i; i=$(($i + 1))
+ done
+ unset IFS;
+ _curpos
+}
+
+_curpos(){ # position cursor
+ echo -n "$TITLECOLOR${CSI}$TDRAWSTATUSLINE;$(($MAXCOL - 9))H"
+ echo -n "          "
+ echo -n "${CSI}$TDRAWSTATUSLINE;$(($MAXCOL - 9))H"
+ echo -n " x${X} y$Y"
+ echo -n "${CSI}$Y;${X}H"
+}
+
+_cursor(){ # position cursor
+ while :
+ do
+  _get_key
+  case "$_KEY" in
+   'UP'|w|W) # curup
+    Y=$(($Y - 1)); if [ $Y -lt 1 ]; then Y=1; fi ;;
+   'DOWN'|s|S) # curdown
+    Y=$(($Y + 1)); if [ $Y -gt $MAXROW ]; then Y=$MAXROW; fi ;;
+   'LEFT'|a|A|<) # curleft
+    X=$(($X - 1)); if [ $X -lt 1 ]; then X=1; fi ;;
+   'RIGHT'|d|D|>) #curright
+    X=$(($X + 1)); if [ $X -gt $MAXCOL ]; then X=$MAXCOL; fi ;;
+   'HOME') X=1 ;;
+   'END') X=$MAXCOL ;;
+   'PGUP') Y=1 ;;
+   'PGDN') Y=$MAXROW ;;
+   'ENTER') break ;;
+  esac
+  _curpos
+ done
+}
+
+_rec_input(){ # line input
+ X1=$X; Y1=$Y;
+ echo -n "$MESSAGECOLOR${CSI}$TDRAWSTATUSLINE;1H"
+ echo -n "Mark 2nd point of rectangle"
+ _cursor
+ echo $X1 $Y1 $X $Y >> $TDRAWRECFILE
+}
+
+_line_input(){ # line input
+ X1=$X; Y1=$Y;
+ echo -n "$MESSAGECOLOR${CSI}$TDRAWSTATUSLINE;1H"
+ echo -n "Mark end of line"
+ _cursor
+ echo -n "$MESSAGECOLOR${CSI}$TDRAWSTATUSLINE;1H"
+ echo -n "Line draw character: "; read -s -n1 CHAR
+ echo $X1 $Y1 $X $Y "$CHAR" >> $TDRAWLINFILE
+}
+
+_text_input(){ # text input
+ echo -n "$MESSAGECOLOR${CSI}$TDRAWSTATUSLINE;1H"
+ echo -n "Text alignment - vert/horiz/up/down (v/h/u/d):"
+ ALIGN=""
+ while :;do case "$ALIGN" in
+  [vVhHuUdD]) break ;;
+  *) read -s -n1 ALIGN ;;
+ esac; done
+ echo -n "$TDRAWCOLOR${CSI}$TDRAWSTATUSLINE;1H"
+ echo -n "                                              "
+ echo -n "$MESSAGECOLOR${CSI}$TDRAWSTATUSLINE;1H"
+ echo -n "Input text: "; read TEXT
+ echo $X $Y $ALIGN $TEXT >> $TDRAWTXTFILE
+}
+
+_cut_obj(){
+ FOUND=0
+ if [ $FOUND -eq 0 ]; then
+  if [ -f $TDRAWTMPFILE ]; then rm $TDRAWTMPFILE; fi
+  if [ -f $TDRAWTXTFILE ]; then while read X1 Y1 ALIGN TEXT; do
+   if [ $X1 -eq $X ] && [ $Y1 -eq $Y ] ; then
+    FOUND=1
+    BUFTYPE="t"; BUFX1=$X1; BUFY1=$Y1; BUFX2=0; BUFY2=0; BUFCHR=$ALIGN; BUFTXT=$TEXT
+    if [ $CUT -eq 0 ]; then echo $X1 $Y1 $ALIGN $TEXT >> $TDRAWTMPFILE; fi
+   else
+    echo $X1 $Y1 $ALIGN $TEXT >> $TDRAWTMPFILE
+   fi
+  done < $TDRAWTXTFILE; fi
+  if [ $FOUND -eq 1 ]; then mv $TDRAWTMPFILE $TDRAWTXTFILE; _draw_scr; fi
+ fi
+
+ if [ $FOUND -eq 0 ]; then
+  if [ -f $TDRAWTMPFILE ]; then rm $TDRAWTMPFILE; fi
+  if [ -f $TDRAWLINFILE ]; then while read X1 Y1 X2 Y2 CHAR; do
+   if [ $X1 -eq $X ] && [ $Y1 -eq $Y ] ; then
+    FOUND=1
+    BUFTYPE="l"; BUFX1=$X1; BUFY1=$Y1; BUFX2=$X2; BUFY2=$Y2; BUFCHR=$CHAR; BUFTXT=""
+    if [ $CUT -eq 0 ]; then echo $X1 $Y1 $X2 $Y2 "$CHAR" >> $TDRAWTMPFILE; fi
+   else
+    echo $X1 $Y1 $X2 $Y2 "$CHAR" >> $TDRAWTMPFILE
+   fi
+  done < $TDRAWLINFILE; fi
+  if [ $FOUND -eq 1 ]; then mv $TDRAWTMPFILE $TDRAWLINFILE; _draw_scr; fi
+ fi
+}
+
+_paste_obj(){
+ if [ $BUFTYPE == "t" ]; then
+  echo $X $Y "$BUFCHR" $BUFTXT >> $TDRAWTXTFILE
+ fi
+ if [ $BUFTYPE == "l" ]; then
+  X2NEW=$(($BUFX2 + $X - $BUFX1)); if [ $X2NEW -gt $MAXCOL ]; then X2NEW=$MAXCOL; fi
+  Y2NEW=$(($BUFY2 + $Y - $BUFY1)); if [ $Y2NEW -gt $MAXROW ]; then Y2NEW=$MAXROW; fi
+  echo $X $Y $X2NEW $Y2NEW "$BUFCHR" >> $TDRAWLINFILE
+ fi
+}
+
+_screenshot(){ # save screenshot
+ if [ -f $TDRAWSSFILE ]; then rm $TDRAWSSFILE; fi
+ i=1
+ IFS='%'
+ while :; do if [ $i -ge $(($MAXROW + 1)) ]; then break; fi
+  eval echo \$SCR$i | sed 's/ *$//g' >> $TDRAWSSFILE
+  i=$(($i + 1))
+ done
+ unset IFS
+# _curpos
+}
+
+_tdraw(){ # Text draw called from user menu
+# i=3; pos=5; eval string$i=asdfghjkl
+# eval echo \$string$i \${string$i:0:$pos}H\${string$i:$(($pos + 1))}
+
+X=1; Y=1
+BUFTYPE=""
+
+_draw_scr
+
+while :
+do
+#echo x.$X y.$Y i.$i maxrow.$MAXROW scr2.$SCR2 scr3.$SCR3
+
+#i=3; pos=25
+#IFS='%'; export TMP=$( eval echo \${SCR$i:0:$pos}H\${SCR$i:$(($pos + 1))} )
+#unset IFS
+#IFS='%'; export SCR$i=$TMP; unset IFS
+
+ _curpos
+ _get_key
+
+ case "$_KEY" in
+
+  'UP'|w|W)
+   Y=$(($Y - 1)); if [ $Y -lt 1 ]; then Y=1; fi ;;
+  'DOWN'|s|S)
+   Y=$(($Y + 1)); if [ $Y -gt $MAXROW ]; then Y=$MAXROW; fi ;;
+  'LEFT'|a|A|<)
+   X=$(($X - 1)); if [ $X -lt 1 ]; then X=1; fi ;;
+  'RIGHT'|d|D|>)
+   X=$(($X + 1)); if [ $X -gt $MAXCOL ]; then X=$MAXCOL; fi ;;
+  'HOME') X=1 ;;
+  'END') X=$MAXCOL ;;
+  'PGUP') Y=1 ;;
+  'PGDN') Y=$MAXROW ;;
+
+  'F1'|[1hH?]) _help_draw; _draw_screen_strings ;; # help
+  'F2'|x|X) CUT=1; _cut_obj ;; # cut
+  'F3'|c|C) CUT=0; _cut_obj ;; # copy
+  'F4'|v|V) _paste_obj; _draw_scr ;; # paste
+  'F6'|[6rR]) _rec_input; _draw_scr ;; # rectangle input
+  'F7'|[7lL]) _line_input; _draw_scr ;; # line input
+  'F8'|[8tT]) _text_input; _draw_scr ;; # text input
+  'F9'|[9pP]) _screenshot; _draw_screen_strings ;; # print screen
+
+  q|Q|'F10'|'ESC') break ;;
+ esac
+done
+}
+
+
+### TSLIDE
+_help_slide(){ # help
+ echo -n "${CSI}$ROW1;1H$HELPCOLOR"
+ echo " Present textfiles "
+ echo "__(named_00...99)__"
+ echo " This help:  1,h,? "
+ echo " Prev:    2,-,p,UP "
+ echo " Next:  3,_,+,n,DN "
+ echo " Edit file:    4,v "
+ echo " FG color:     5,f "
+ echo " BG color:     6,b "
+ echo " Effect:       7,e "
+ echo " Delete file:    8 "
+ echo " Goto:         9,g "
+ echo " Exit:  0,q,ESCESC "
+ echo "_Infoline:____11,i_"
+ echo $ERESET
+ read -n1 -s DUMMY
+}
+
+_print_slide_helpline(){ # help in statusline
+ echo -n "${CSI}$MAXROW;1H$TITLECOLOR"
+ echo -n "1_hlp  2_prev  3_nxt  4_edit  5_FG  6_BG  7_fx  8_del  9_gto  10_exit  11_info"
+ echo -n "${CSI}$MAXROW;$(($MAXCOL - 1))H"
+ if [ $slide -le 9 ]; then echo -n 0$slide; else echo -n $slide; fi
+ echo -n $ERESET
+}
+
+_choosecol(){ # choose color
+ echo -n "${CSI}$ROW1;1H$HELPCOLOR"
+ echo "__Set_color___"
+ echo "0 black       "
+ echo "1 red         "
+ echo "2 green       "
+ echo "3 brown       "
+ echo "4 blue        "
+ echo "5 magenta     "
+ echo "6 cyan        "
+ echo "7 white       "
+ echo "_Your_choice:_"
+ echo $ERESET
+ read -n1 COLOR
+}
+
+_chooseeffect(){
+ echo -n "${CSI}$ROW1;1H$HELPCOLOR"
+ echo "__Set_effect__"
+ echo "0 reset       "
+ echo "1 bold        "
+ echo "5 blink       "
+ echo "7 reverse     "
+ echo "_Your_choice:_"
+ echo $ERESET
+ read -n1 EFFECT
+}
+
+_print_slide(){ # cat file
+ echo -n $SLIDEEFFECT$SLIDEFGCOLOR$SLIDEBGCOLOR; clear
+ if [ $slide -le 9 ]; then cat $PATH0/0$slide | more; else cat $PATH0/$slide | more; fi
+ echo $ERESET
+}
+
+_tslide(){ # Text slide show called from user menu
+i=0; _print_slide
+
+while :
+do
+ if [ $SHOWHELP -eq 1 ]; then _print_slide_helpline; fi
+ _get_key
+
+ case "$_KEY" in
+  [0-9]) i=$(($i * 10)); i=$(($i + $_KEY)) ;; # collect number for goto
+
+  'F1'|[hH?]) _help_slide; _print_slide ;; # help
+
+  'F2'|'PGUP'|'UP'|[-pPwW]) # prev slide
+   if [ $slide -le 1 ]; then slide=$(($slide + 1)); fi
+   slide=$(($slide - 1)); _print_slide; i=0 ;;
+
+  'F3'|'SPACE'|'ENTER'|'PGDN'|'DOWN'|[+nNsS]) # next slide
+   if [ $slide -ge 99 ]; then slide=$(($slide - 1)); fi
+   slide=$(($slide + 1)); _print_slide; i=0 ;;
+
+  'F4'|v) echo $CURON # edit
+   if [ $slide -le 9 ]; then $EDITOR 0$slide; else $EDITOR $slide; fi
+   _print_slide; i=0; echo $CUROFF ;;
+
+  'F5'|f) _choosecol # foreground color
+   SLIDEFGCOLOR=${CSI}3${COLOR}m; _print_slide; i=0 ;;
+
+  'F6'|b) _choosecol # background color
+   SLIDEBGCOLOR=${CSI}4${COLOR}m; _print_slide; i=0 ;;
+
+  'F7'|e) _chooseeffect # effect
+   SLIDEEFFECT=${CSI}${EFFECT}m; _print_slide; i=0 ;;
+
+  'F8') if [ $slide -le 9 ]; then rm 0$slide; else rm $slide; fi # del slide
+   _print_slide; i=0 ;;
+
+  'F9'|[gG]) if [ $i -le 0 ]; then i=1; fi # goto slide
+   slide=$i; _print_slide; i=0 ;;
+
+  'F11'|i|I) if [ $SHOWHELP -eq 1 ]; then SHOWHELP=0; else SHOWHELP=1;
+    fi; _print_slide ;; # helpline
+
+  q|Q|'F10'|'ESC') break ;;
+
+  *) i=0 ;;
+ esac
+done
+}
+
+
+### TCALC
+_help_tcalc(){ # help
+ echo -n "${CSI}$CALCHELPROW;1H$HELPCOLOR"
+ echo " Q_sqr/sqrt    E_ee       R_rot>/<   T_tan/arc  I_invert   P_pi/pwr             "
+ echo " A_annu        S_sin/arc  D_deg/rad  F_fix/sci  G_gamma!   K_log/10^x  L_ln/exp "
+ echo " X_swap        C_cos/arc  V_sinh/ar  B_cosh/ar  N_tanh/ar  M_rcl/sto            "
+ echo " F10,ESC_exit  BKSPC_clx  DEL_clr    SPC_chs                                    "
+ echo $ERESET
+}
+
+_print_tcalc_helpline(){ # help in statusline
+ echo -n "${CSI}$STATUSLINE;1H$TITLECOLOR"
+ echo " 1_+  2_-  3_*  4_/  5_sqr  6_sqrt  7_1/x  8_y^x  9_PI  10_exit  11_STO  12_RCL "
+ echo $ERESET
+}
+
+_print_stack(){
+ echo -n $CALCPANCOLOR
+ echo -n "${CSI}$CALCPANROW;1H$CLEARSTRING$CLEARSTRING"
+ echo -n "${CSI}$(($CALCPANROW + 1));1H$CLEARSTRING$CLEARSTRING"
+ echo -n "${CSI}$(($CALCPANROW + 2));1H$CLEARSTRING$CLEARSTRING"
+ echo -n "${CSI}$(($CALCPANROW + 3));1H$CLEARSTRING$CLEARSTRING"
+ echo -n "${CSI}$CALCPANROW;1H"
+ if [ $FMT -lt 100 ]; then
+  echo " $U $Z $Y $X" |
+   awk '{printf " %.'''$FMT'''f\n %.'''$FMT'''f\n %.'''$FMT'''f\n %.'''$FMT'''f\n",$1,$2,$3,$4}'
+ else
+  echo " $U $Z $Y $X" | awk '{printf " %e\n %e\n %e\n %e\n",$1,$2,$3,$4}'
+ fi
+ echo -n $ERESET
+}
+
+_print_string(){
+ echo -n "$CALCINPUTCOLOR${CSI}$CALCINPUTROW;1H$CLEARSTRING$CLEARSTRING"
+ echo -n "${CSI}$CALCINPUTROW;1H $STRING"
+ echo -n $ERESET
+}
+
+_push(){ # push string to stack
+ U=$Z; Z=$Y; Y=$X; X=$STRING; STRING=''
+}
+
+_tcalc(){ # RPN-calculator called from user menu
+PI=3.141592653589793238462643
+STRING=""
+FMT=2; STO=0
+X=0; Y=0; Z=0; U=0; TMP=0
+RAD=$( awk 'BEGIN{ print '''$PI'''/180;}' )
+
+_help_tcalc; _print_stack
+_print_tcalc_helpline; _print_string
+
+while :
+do
+ _get_key
+
+ case "$_KEY" in
+  [0-9,.eE]) # add number to string
+   if [ $_KEY == ',' ]; then _KEY='.'; fi
+   STRING=$STRING$_KEY; _print_string ;;
+  'BACKSPACE'|'TAB') # del X or last string char
+   if [ -z $STRING ]; then X=$Y; Y=$Z; Z=$U;
+   else STRING=${STRING%?}; fi ;; #_print_string; fi ;;
+  'ENTER') U=$Z; Z=$Y; Y=$X # push stack
+   if [ ! -z $STRING ]; then X=$STRING; STRING=''; fi ;;
+  'F10'|'ESC') break ;;
+
+  *) # no string input - other operation
+   if [ ! -z $STRING ]; then _push; fi
+
+   case "$_KEY" in
+    +|'F1') X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$X'''+'''$Y''';}' ); Y=$Z; Z=$U; STRING='' ;;
+    -|'F2') X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$Y'''-'''$X''';}' ); Y=$Z; Z=$U; STRING='' ;;
+    '*'|'F3') X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$X'''*'''$Y''';}' ); Y=$Z; Z=$U; STRING='' ;;
+    /|'F4') X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$Y'''/'''$X''';}' ); Y=$Z; Z=$U; STRING='' ;;
+    'SPACE') X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",-1*'''$X''';}' ) ;;
+    'DEL') X=0; Y=0; Z=0; U=0 ;;
+    b) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",(exp('''$X''')+exp(-'''$X'''))/2;}' ) ;;
+    B) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",log('''$X'''+sqrt('''$X'''*'''$X'''-1));}' ) ;;
+
+    a) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",((1-1/exp('''$X'''*log(1+'''$Y''')))/'''$Y''');}' ) ;;
+    c) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",cos('''$X'''*'''$RAD''');}' ) ;;
+    C) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",('''$PI'''/2-atan2('''$X'''/(sqrt(1-'''$X'''*'''$X''')),1))/'''$RAD''';}' ) ;;
+    d) RAD=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$PI'''/180;}' ) ;;
+    D) RAD=1 ;;
+    f) if [ $X -le $(($PREC - 2)) ]; then FMT=$X; else FMT=$(($PREC - 2)); fi; X=$Y; Y=$Z; Z=$U ;;
+    F) FMT=100 ;;
+    g) i=1; TMP=1; X=$( awk 'BEGIN{ print int('''$X''');}' )
+     while :; do
+      if [ $i -gt $X ]; then break; fi
+      TMP=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$TMP'''*'''$i''';}' )
+      i=$(($i + 1))
+     done; X=$TMP ;;
+    i|'F7') X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",1/'''$X''';}' ) ;;
+    k) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",log('''$X''')/log(10);}' ) ;;
+    K) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",exp('''$X'''*log(10));}' ) ;;
+    l) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",log('''$X''');}' ) ;;
+    L) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",exp('''$X''');}' ) ;;
+    m|'F12') U=$Z; Z=$Y; Y=$X; X=$STO ;;
+    M|'F11') STO=$X ;;
+    n) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",(exp('''$X''')-exp(-'''$X'''))/(exp('''$X''')+exp(-'''$X'''));}' ) ;;
+    N) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",log(sqrt((1+'''$X''')/(1-'''$X''')));}' ) ;;
+    q|'F5') X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",'''$X'''*'''$X''';}' ) ;;
+    Q|'F6') X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",sqrt('''$X''');}' ) ;;
+    p|'F9') U=$Z; Z=$Y; Y=$X; X=$PI ;;
+    P|'F8') X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",exp('''$X'''*log('''$Y'''));}' ); Y=$Z; Z=$U ;;
+    r) TMP=$X; X=$Y; Y=$Z; Z=$U; U=$TMP ;;
+    R) TMP=$U; U=$Z; Z=$Y; Y=$X; X=$TMP ;;
+    s) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",sin('''$X'''*'''$RAD''');}' ) ;;
+    S) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",atan2('''$X'''/(sqrt(1-'''$X'''*'''$X''')),1)/'''$RAD''';}' ) ;;
+    t) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",sin('''$X'''*'''$RAD''')/cos('''$X'''*'''$RAD''');}' ) ;;
+    T) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",atan2('''$X''',1)/'''$RAD''';}' ) ;;
+    x) TMP=$X; X=$Y; Y=$TMP ;;
+    v) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",(exp('''$X''')-exp(-'''$X'''))/2;}' ) ;;
+    V) X=$( awk 'BEGIN{ printf "%.'''$PREC'''f",log('''$X'''+sqrt('''$X'''*'''$X'''+1));}' ) ;;
+   esac ;;
+
+ esac
+ _print_stack; _print_string
+done
+echo $ERESET
+}
+
+
+### MAIN PROGRAM
+PAN=1
+FILENR1=1; FILENR2=1; FILENR=1
+CURLINE1=0; CURLINE2=0; CURLINE=0
+FILECHOOSE1=1; FILECHOOSE2=1; FILECHOOSE=1
+PATH1=$(pwd); PATH2="/"; PATH0=$PATH1
+FILECOUNT1=$(ls -A $PATH1 | wc -w); FILECOUNT2=$(ls -A $PATH2 | wc -w)
+FILECOUNT=$FILECOUNT1
+
+_print_all
+echo $CUROFF
+
+while :
+do
+ _print
+ _get_key
+
+ case "$_KEY" in
+  'TAB'|'BACKSPACE') _switch_panel ;; # switch panel
+
+  'DOWN'|s|S) _scroll_down ;; # scroll down
+  'PGDN') _page_down ;; # scroll page down
+  'UP'|w|W) _scroll_up ;; # scroll up
+  'PGUP') _page_up ;; # scroll page up
+
+  'HOME') FILENR=1; FILECHOOSE=1; CURLINE=0 ;; # BOL
+  'END') FILENR=$(($FILECOUNT - $MAXFILELIST + 1)) # EOL
+   if [ $FILENR -lt 1 ]; then FILENR=1; fi
+   FILECHOOSE=$FILECOUNT; CURLINE=$(($MAXFILELIST - 1))
+   if [ $FILECOUNT -lt $MAXFILELIST ]; then CURLINE=$(($FILECOUNT - 1)); fi ;;
+
+  'LEFT'|a|A|<) _clear_pan; _change_dir_up; ;; # cd ..
+  'RIGHT'|d|D|>) if [ $CHOSENDIR == d ]; then # cd
+    _clear_pan; _change_dir_down; fi ;;
+
+  'F1'|1|h|H|'?') _help; _print_all ;; # help
+  'F2'|2|u|U) _menu; _print_all ;; # menu
+  'F3'|3|l|L) cat $CHOSENFILE | less; _print_all ;; # cat
+  'F4'|4|e|E) echo $CURON; $EDITOR $CHOSENFILE; echo $CUROFF; _print_all ;; # edit
+  'F5'|5|c|C) _copy_file; _print_all; ;; # copy
+  'F6'|6|m|M) _move_file; _print_all; ;; # move
+  'F7'|7|r|R) _rename_file; _print_all; ;; # rename
+  'F8'|8) _delete_file; _print_all ;; # delete
+  'F9'|9) _make_dir; _print_all; ;; # mkdir
+  'F11') _do_something; _print_all ;; # do smthg with file
+
+  'SPACE') echo $CURON; _execute_shell; echo $CUROFF;_print_all ;; # shell
+
+  'ENTER'|x|X) if [ $CHOSENDIR == d ]; then # cd or execute
+    _clear_pan; _change_dir_down
+   else ./$CHOSENFILE; _print_all
+   fi ;;
+
+  q|Q|0|'F10'|'ESC') break ;;
+ esac
+done
+echo $CURON
+
