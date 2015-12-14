@@ -1,7 +1,9 @@
-#! /bin/busybox ash
+#! /bin/ash
 # Tiny commander
 # Console file manager, written as shell script for ash (busybox)
 # Including tcalc (RPN-calculator) and tslide (text slide show)
+#
+# Start tinycommander with <./busybox ash tinycommander>
 
 ### GLOBAL VARIABLES
 ESC=$'\x1b'
