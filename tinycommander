@@ -559,7 +559,7 @@ _push(){ # push string to stack
 _tcalc(){ # RPN-calculator called from user menu
 PI=3.141592653589793238462643
 STRING=""
-FMT=2; STO=0
+FMT=4; STO=0
 X=0; Y=0; Z=0; U=0; TMP=0
 RAD=$( awk 'BEGIN{ print '''$PI'''/180;}' )
 
